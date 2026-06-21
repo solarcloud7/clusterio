@@ -2,7 +2,7 @@
 // tap --before module: boots a real clusterio controller ONCE for the whole tap run,
 // leaves it running for the (isolated, per-file) test subprocesses, and records its pid
 // so teardown.js can stop it. Intentionally mirrors a minimal slice of
-// test/integration/index.js's root before().
+// test/integration/index.js's root before() (see TEST_REFACTOR_PLAN.md).
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const cp = require("node:child_process");

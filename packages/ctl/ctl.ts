@@ -150,6 +150,7 @@ export async function initialize(
 	argv: string | string[],
 	ctlPlugins?: Map<string, BaseCtlPlugin>,
 	noLoggerTransport?: boolean,
+	ipc?: boolean,
 ): Promise<InitializeParameters> {
 	// Build a fresh, isolated yargs parser each time this function is called.
 	// If the currently loaded yargs object supports .reset() we use that (older versions),
@@ -185,6 +186,7 @@ export async function initialize(
 			type: "string",
 		})
 		.option("bypass-lock-file", { hidden: true, type: "boolean", nargs: 0, default: false })
+		.option("ipc", { hidden: true, type: "boolean", nargs: 0, default: false })
 		.command("plugin", "Manage available plugins", lib.pluginCommand)
 		.command("control-config", "Manage Control config", lib.configCommand)
 		.wrap(parser.terminalWidth())
@@ -227,6 +229,11 @@ export async function initialize(
 	args = parser
 		.help()
 		.strict()
+		// In IPC mode the parser is long-lived and serves many commands, so a parse error
+		// (unknown command/option) must throw to the command handler instead of calling
+		// process.exit and killing the whole server. The normal CLI keeps yargs' default
+		// exit-on-error behaviour so `--help`, no-args and bad commands exit cleanly.
+		.exitProcess(!ipc)
 		.parse(argv) as CtlArguments
 	;
 
@@ -252,7 +259,12 @@ export async function initialize(
 		}
 	}
 
-	if (args._.length === 0) {
+	if (args._.length === 0 && !args.ipc) {
+		// With exitProcess(false) in IPC mode, parser.exit() would not exit; throw so the
+		// command handler reports the error instead of falling through to command selection.
+		if (ipc) {
+			throw new lib.CommandError("No command provided");
+		}
 		parser.showHelp();
 		parser.exit(1, undefined as unknown as Error); // Type definition file is wrong.
 	}
@@ -313,6 +325,37 @@ async function startControl() {
 	// Handle interrupts
 	process.on("SIGINT", lib.createShutdownGuard(logger, "interrupt", control.shutdown.bind(control)));
 	process.on("SIGTERM", lib.createShutdownGuard(logger, "termination", control.shutdown.bind(control)));
+
+	if (args.ipc) {
+		control.keepOpen = true;
+		process.on("message", async (msg: any) => {
+			if (msg.type === "command") {
+				try {
+					// We pass ctlPlugins to reuse loaded plugins, true to avoid duplicate loggers,
+					// and ipc=true so parse errors throw here instead of killing the server.
+					const initParams = await initialize(msg.command, ctlPlugins, true, true);
+					if (!initParams.shouldRun) {
+						process.send!({ type: "result", id: msg.id, success: true });
+						return;
+					}
+					const targetCommand = selectTargetCommand(initParams.args, initParams.rootCommands!);
+					await targetCommand.run(initParams.args, control);
+					process.send!({ type: "result", id: msg.id, success: true });
+				} catch (err: any) {
+					process.send!({
+						type: "result", id: msg.id, success: false,
+						error: err.stack ?? err.message ?? String(err),
+					});
+				}
+			} else if (msg.type === "exit") {
+				control.keepOpen = false;
+				await control.shutdown();
+				process.exit(0);
+			}
+		});
+		process.send!({ type: "ready" });
+		return;
+	}
 
 	try {
 		const targetCommand = selectTargetCommand(args, rootCommands);

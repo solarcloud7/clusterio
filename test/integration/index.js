@@ -177,6 +177,7 @@ function getFactorioDir(hostConfig) {
 
 let controllerProcess;
 let hostProcess;
+let ctlProcess;
 let control;
 let haveFactorioInstall;
 
@@ -223,28 +224,33 @@ function execCtlProcess(...args) {
 }
 
 let inExecCtl = false;
+let execCtlMsgId = 0;
+const execCtlResolvers = new Map();
+
 async function execCtl(command) {
 	inExecCtl = true;
-	process.chdir("temp/test");
+	// process.chdir is no longer needed because the child process has its own cwd
 	try {
-		const initArgs = await initializeCtl(command, control.plugins, true);
-		if (!initArgs.shouldRun) {
-			return;
-		}
-
-		control.config = initArgs.controlConfig;
-		const targetCommand = selectTargetCommand(initArgs.args, initArgs.rootCommands);
-		await targetCommand.run(initArgs.args, control);
+		await new Promise((resolve, reject) => {
+			const id = execCtlMsgId;
+			execCtlMsgId += 1;
+			execCtlResolvers.set(id, { resolve, reject });
+			ctlProcess.send({ type: "command", id, command });
+		});
+		// The command ran in a separate ctl process, so update events the controller
+		// broadcasts to our in-process `control` connection may still be in flight when the
+		// command resolves. Round-trip a cheap request on `control`: a single WebSocket
+		// connection delivers in order, so any broadcast the controller already queued ahead
+		// of this request is guaranteed to be received before this request's response.
+		await control.send(new lib.HostListRequest());
 	} finally {
-		process.chdir("../..");
 		inExecCtl = false;
 	}
 }
 
 afterEach(function() {
 	if (inExecCtl) {
-		// This is needed in case a test times out and never runs the finally block
-		process.chdir("../..");
+		inExecCtl = false;
 	}
 });
 
@@ -389,6 +395,45 @@ before(async function() {
 		"controller",
 		new lib.ControllerConfigSetFieldRequest("controller.default_mod_pack_id", "12"),
 	);
+
+	console.log("Starting ctl IPC server");
+	ctlProcess = child_process.fork("../../packages/ctl", ["--ipc"], {
+		cwd: path.join(process.cwd(), "temp", "test"),
+		env: process.env,
+		execArgv: ["--enable-source-maps"],
+	});
+
+	ctlProcess.on("message", (msg) => {
+		if (msg.type === "result" && execCtlResolvers.has(msg.id)) {
+			const { resolve, reject } = execCtlResolvers.get(msg.id);
+			execCtlResolvers.delete(msg.id);
+			if (msg.success) {
+				resolve();
+			} else {
+				reject(new Error(msg.error));
+			}
+		}
+	});
+
+	ctlProcess.on("exit", () => {
+		for (const { reject } of execCtlResolvers.values()) {
+			reject(new Error("ctl process exited prematurely"));
+		}
+		execCtlResolvers.clear();
+	});
+
+	ctlProcess.on("error", (err) => {
+		for (const { reject } of execCtlResolvers.values()) {
+			reject(new Error(`ctl process error: ${err.message}`));
+		}
+		execCtlResolvers.clear();
+	});
+
+	await Promise.race([
+		events.once(ctlProcess, "message"), // wait for "ready"
+		events.once(ctlProcess, "exit").then(() => Promise.reject(new Error("ctl exited before ready"))),
+		events.once(ctlProcess, "error").then((err) => Promise.reject(err)),
+	]);
 });
 
 after(async function() {
@@ -406,6 +451,11 @@ after(async function() {
 	if (control) {
 		await control.connector.close();
 	}
+	if (ctlProcess) {
+		console.log("Shutting down ctl");
+		ctlProcess.send({ type: "exit" });
+		await events.once(ctlProcess, "exit");
+	}
 	if (haveFactorioInstall === false) {
 		console.warn("Many tests may have been skipped due to no factorio install being detected");
 	}
@@ -415,6 +465,7 @@ after(async function() {
 process.on("exit", () => {
 	if (hostProcess) { hostProcess.kill(); }
 	if (controllerProcess) { controllerProcess.kill(); }
+	if (ctlProcess) { ctlProcess.kill(); }
 });
 
 

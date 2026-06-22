@@ -9,7 +9,20 @@ const hostServer = require("@clusterio/host/dist/node/src/server");
 const lib = require("@clusterio/lib");
 const { wait } = lib;
 const { testLines } = require("../lib/factorio/lines");
-const { slowTest } = require("../integration");
+const { slowTest, requiresFactorio, factorioDir } = require("../integration");
+
+// Resolved at module load (before any test changes cwd) so it survives process.chdir.
+const realFactorioDir = path.resolve(factorioDir);
+
+// A logger that records messages so a test can assert/print what was logged.
+function recordingLogger(sink) {
+	const handler = {
+		get: (_t, prop) => (prop === "child"
+			? () => new Proxy({}, handler)
+			: (msg) => sink.push(`[${String(prop)}] ${msg}`)),
+	};
+	return new Proxy({}, handler);
+}
 
 
 describe("host/server", function() {
@@ -306,6 +319,74 @@ describe("host/server", function() {
 				server._unexpected[0].startsWith("Factorio failed to bind to RCON port:"),
 				`unexpected was ${JSON.stringify(server._unexpected)}`
 			);
+		});
+	});
+
+	describe("RCON port handling with a real Factorio server (#923)", function() {
+		requiresFactorio(this);
+		const writeDir = path.resolve(path.join("temp", "test", "rcon-923"));
+		const saveName = "rcon-923";
+		// Written under the logs dir that CI uploads as an artifact, so the real
+		// behaviour can be inspected after the run.
+		const proofLog = path.resolve(path.join("temp", "test", "logs", "rcon-923-proof.log"));
+
+		function occupy(port) {
+			return new Promise((resolve, reject) => {
+				let s = net.createServer();
+				s.once("error", reject);
+				s.listen(port, "0.0.0.0", () => resolve(s));
+			});
+		}
+
+		before(async function() {
+			this.timeout(120000);
+			slowTest(this);
+			await fs.rm(writeDir, { force: true, recursive: true, maxRetries: 10 });
+			await fs.mkdir(writeDir, { recursive: true });
+			await fs.mkdir(path.dirname(proofLog), { recursive: true });
+			let server = new hostServer.FactorioServer(realFactorioDir, writeDir, {});
+			await server.init();
+			await server.create(saveName);
+		});
+
+		it("re-rolls an in-use dynamic RCON port and still starts", async function() {
+			this.timeout(120000);
+			slowTest(this);
+			let blocker = await occupy(0);
+			let busyPort = blocker.address().port;
+			let logged = [];
+			let server = new hostServer.FactorioServer(realFactorioDir, writeDir, { logger: recordingLogger(logged) });
+			server.rconPort = busyPort; // force the auto-assigned dynamic port onto the busy one
+			try {
+				await server.start(`${saveName}.zip`);
+				assert.notEqual(server.rconPort, busyPort, "RCON port should have been re-rolled off the busy one");
+				// Recorded to the uploaded logs artifact so the behaviour is inspectable.
+				await fs.appendFile(proofLog,
+					`#923 re-roll: forced busy ${busyPort} -> server started on ${server.rconPort}; ` +
+					`log=${JSON.stringify(logged.filter(l => /RCON port/.test(l)))}\n`
+				);
+			} finally {
+				await server.stop().catch(() => {});
+				await new Promise(resolve => blocker.close(resolve));
+			}
+		});
+
+		it("reports an in-use configured RCON port as an RCON bind failure", async function() {
+			this.timeout(120000);
+			slowTest(this);
+			let blocker = await occupy(0);
+			let busyPort = blocker.address().port;
+			let server = new hostServer.FactorioServer(realFactorioDir, writeDir, { rconPort: busyPort });
+			try {
+				let failure = new Promise(resolve => server.once("error", err => resolve(err.message)));
+				server.start(`${saveName}.zip`).catch(() => {});
+				let message = await failure;
+				await fs.appendFile(proofLog, `#923 reporting: host reported -> ${message}\n`);
+				assert(/failed to bind to RCON port/.test(message), `expected RCON bind failure, got: ${message}`);
+			} finally {
+				await server.stop().catch(() => {});
+				await new Promise(resolve => blocker.close(resolve));
+			}
 		});
 	});
 

@@ -7,6 +7,7 @@ import JSZip from "jszip";
 import events from "events";
 import util from "util";
 import crypto from "crypto";
+import net from "node:net";
 import { Rcon } from "rcon-client";
 
 import * as lib from "@clusterio/lib";
@@ -244,6 +245,28 @@ function randomDynamicPort() {
 	const end = 65535 + 1;
 
 	return Math.floor(Math.random() * (end - start) + start);
+}
+
+/**
+ * Check whether a TCP port is free to bind
+ *
+ * Attempts to listen on the given port on all IPv4 interfaces (matching how
+ * Factorio binds RCON) and reports whether the bind succeeded.  Used to avoid
+ * handing Factorio an RCON port that is already in use.
+ *
+ * @param port - TCP port to test.
+ * @return true if the port could be bound, false otherwise.
+ * @internal
+ */
+function portAvailable(port: number): Promise<boolean> {
+	return new Promise(resolve => {
+		const tester = net.createServer();
+		tester.once("error", () => resolve(false));
+		tester.once("listening", () => {
+			tester.close(() => resolve(true));
+		});
+		tester.listen(port, "0.0.0.0");
+	});
 }
 
 /**
@@ -508,10 +531,10 @@ const outputHeuristics: Heuristic[] = [
 		filter: {
 			type: "log",
 			level: "Error",
-			message: [
-				"Can't bind socket: Address already in use",
-				"Can't bind socket: Permission denied",
-			],
+			// Factorio prefixes this with "Hosting multiplayer game failed: " and the
+			// suffix varies by OS ("Address already in use"/"Permission denied" on Linux,
+			// a WSA "Error code NNNNN" on Windows), so match the stable phrase.
+			message: /Can't bind socket:/,
 		},
 		action: function(parsed) {
 			this._unexpected.push(`Factorio failed to bind to RCON port: ${parsed.message}`);
@@ -641,6 +664,8 @@ export class FactorioServer extends events.EventEmitter<FactorioServerEvents> {
 	_server: child_process.ChildProcessWithoutNullStreams | null = null;
 	_rconClient: Rcon | null= null;
 	_rconReady = false;
+	/** Whether the RCON port was auto-assigned, and so may be re-rolled if in use */
+	_rconPortDynamic = false;
 	_gameReady = false;
 	_stripRegExp?: RegExp;
 	_maxConcurrentCommands = 5;
@@ -671,6 +696,9 @@ export class FactorioServer extends events.EventEmitter<FactorioServerEvents> {
 		this.gamePort = options.gamePort || randomDynamicPort();
 		/** TCP port used for RCON on the Factorio game server */
 		this.rconPort = options.rconPort || randomDynamicPort();
+		// A random dynamic port is occasionally already in use; remember that we
+		// picked it so start() can verify it is free and re-roll if needed.
+		this._rconPortDynamic = !options.rconPort;
 		/** Password used for RCON on the Factorio game server */
 		this.rconPassword = options.rconPassword as string; // init will generate one if not there
 		/** Enable player whitelist */
@@ -1185,6 +1213,29 @@ export class FactorioServer extends events.EventEmitter<FactorioServerEvents> {
 	}
 
 	/**
+	 * Ensure the RCON port is free to bind
+	 *
+	 * When the RCON port was not explicitly configured it defaults to a random
+	 * port in the dynamic range (see the constructor), which is occasionally
+	 * already in use.  Test the port and re-roll until a free one is found so
+	 * Factorio does not fail to bind it on startup.  Does nothing when the port
+	 * was explicitly configured.
+	 */
+	async _assignRconPort() {
+		if (!this._rconPortDynamic) {
+			return;
+		}
+		for (let attempt = 0; attempt < 10; attempt++) {
+			if (await portAvailable(this.rconPort)) {
+				return;
+			}
+			this._logger.info(`RCON port ${this.rconPort} is in use, picking another`);
+			this.rconPort = randomDynamicPort();
+		}
+		this._logger.warn(`Unable to find a free RCON port after 10 attempts; starting with ${this.rconPort}`);
+	}
+
+	/**
 	 * Start server
 	 *
 	 * Spawn the Factorio server with the --start-server argument to
@@ -1194,6 +1245,7 @@ export class FactorioServer extends events.EventEmitter<FactorioServerEvents> {
 	 */
 	async start(save: string) {
 		this._check(["init"]);
+		await this._assignRconPort();
 		this._state = "running";
 
 		try {
@@ -1246,6 +1298,7 @@ export class FactorioServer extends events.EventEmitter<FactorioServerEvents> {
 	 */
 	async startScenario(scenario: string, seed?: number, mapGenSettings?: object, mapSettings?: object) {
 		this._check(["init"]);
+		await this._assignRconPort();
 		this._state = "running";
 
 		try {
@@ -1557,5 +1610,6 @@ export const _listFactorioVersions = listFactorioVersions;
 export const _downloadAndExtractZip = downloadAndExtractZip;
 export const _downloadAndExtractTar = downloadAndExtractTar;
 export const _randomDynamicPort = randomDynamicPort;
+export const _portAvailable = portAvailable;
 export const _generatePassword = generatePassword;
 export const _parseOutput = parseOutput;

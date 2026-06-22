@@ -2,6 +2,7 @@
 const assert = require("assert").strict;
 const events = require("events");
 const fs = require("node:fs/promises");
+const net = require("node:net");
 const path = require("path");
 
 const hostServer = require("@clusterio/host/dist/node/src/server");
@@ -187,6 +188,64 @@ describe("host/server", function() {
 		});
 	});
 
+	describe("portAvailable()", function() {
+		it("should return false for a port that is in use", async function() {
+			let blocker = net.createServer();
+			await new Promise(resolve => blocker.listen(0, "0.0.0.0", resolve));
+			let port = blocker.address().port;
+			try {
+				assert.equal(await hostServer._portAvailable(port), false);
+			} finally {
+				await new Promise(resolve => blocker.close(resolve));
+			}
+		});
+
+		it("should return true for a free port", async function() {
+			// Let the OS hand out a free port, release it, then confirm it's reported free.
+			let finder = net.createServer();
+			await new Promise(resolve => finder.listen(0, "0.0.0.0", resolve));
+			let port = finder.address().port;
+			await new Promise(resolve => finder.close(resolve));
+			assert.equal(await hostServer._portAvailable(port), true);
+		});
+	});
+
+	describe("FactorioServer._assignRconPort()", function() {
+		it("should move off a dynamic RCON port that is in use", async function() {
+			let server = new hostServer.FactorioServer(
+				path.join("test", "file", "factorio"), path.join("temp", "test", "server-rcon"), {}
+			);
+			let blocker = net.createServer();
+			await new Promise(resolve => blocker.listen(0, "0.0.0.0", resolve));
+			let busyPort = blocker.address().port;
+			server.rconPort = busyPort; // force the auto-assigned port to the one in use
+			try {
+				await server._assignRconPort();
+				assert.notEqual(server.rconPort, busyPort);
+				assert.equal(await hostServer._portAvailable(server.rconPort), true);
+			} finally {
+				await new Promise(resolve => blocker.close(resolve));
+			}
+		});
+
+		it("should leave an explicitly configured RCON port untouched", async function() {
+			let blocker = net.createServer();
+			await new Promise(resolve => blocker.listen(0, "0.0.0.0", resolve));
+			let configuredPort = blocker.address().port;
+			let server = new hostServer.FactorioServer(
+				path.join("test", "file", "factorio"), path.join("temp", "test", "server-rcon-2"),
+				{ rconPort: configuredPort }
+			);
+			try {
+				await server._assignRconPort();
+				// A configured port must not be changed even when it is in use.
+				assert.equal(server.rconPort, configuredPort);
+			} finally {
+				await new Promise(resolve => blocker.close(resolve));
+			}
+		});
+	});
+
 	describe("generatePassword()", function() {
 		it("should return a string", async function() {
 			let password = await hostServer._generatePassword(1);
@@ -211,6 +270,42 @@ describe("host/server", function() {
 				let output = hostServer._parseOutput(line, "test");
 				assert.deepEqual(output, reference);
 			}
+		});
+	});
+
+	describe("RCON bind failure reporting", function() {
+		it("should attribute a prefixed \"Can't bind socket\" error to the RCON port", function() {
+			// Factorio reports an in-use RCON port with a "Hosting multiplayer game
+			// failed: " prefix; the heuristic must still attribute it to the RCON port
+			// rather than falling through to a generic "shut down with code 1".
+			let server = new hostServer.FactorioServer(
+				path.join("test", "file", "factorio"), path.join("temp", "test", "server-bind"), {}
+			);
+			server._handleOutput(Buffer.from(
+				"   0.575 Error CommandLineMultiplayer.cpp:364: " +
+				"Hosting multiplayer game failed: Can't bind socket: Address already in use"
+			), "stdout");
+			assert.deepEqual(server._unexpected, [
+				"Factorio failed to bind to RCON port: " +
+				"Hosting multiplayer game failed: Can't bind socket: Address already in use",
+			]);
+		});
+
+		it("should attribute the Windows form of the bind error to the RCON port", function() {
+			// On Windows the suffix is a WSA error code rather than "Address already in use".
+			let server = new hostServer.FactorioServer(
+				path.join("test", "file", "factorio"), path.join("temp", "test", "server-bind-win"), {}
+			);
+			server._handleOutput(Buffer.from(
+				"   1.318 Error CommandLineMultiplayer.cpp:355: Hosting multiplayer game failed: " +
+				"Can't bind socket: Error code 10013, An attempt was made to access a socket " +
+				"in a way forbidden by its access permissions."
+			), "stdout");
+			assert.equal(server._unexpected.length, 1);
+			assert(
+				server._unexpected[0].startsWith("Factorio failed to bind to RCON port:"),
+				`unexpected was ${JSON.stringify(server._unexpected)}`
+			);
 		});
 	});
 

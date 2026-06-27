@@ -27,7 +27,7 @@ export function isVersionEquality(input: string): input is VersionEquality {
  * Matches valid factorio versions accepts by the web API
  * https://wiki.factorio.com/Mod_portal_API#/api/mods (see version enum)
  */
-export const ApiVersions = ["0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0"] as const;
+export const ApiVersions = ["0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0", "2.1"] as const;
 export const ApiVersionSchema = Type.Union(ApiVersions.map(v => Type.Literal(v)));
 export type ApiVersion = Static<typeof ApiVersionSchema>;
 

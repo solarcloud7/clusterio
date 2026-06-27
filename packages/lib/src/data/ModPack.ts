@@ -396,13 +396,13 @@ export default class ModPack {
 
 	/** Array of default mod packs which should exist on a newly installed cluster */
 	static defaultModPacks = [
-		...(["0.17", "0.18", "1.0", "1.1", "2.0"] as const)
+		...(["0.17", "0.18", "1.0", "1.1", "2.0", "2.1"] as const)
 			.map(version => this.fromJSON({
 				name: `Base Game ${version}`,
 				description: `Factorio ${version} with no extra mods.`,
 				factorio_version: version,
 			} as any)),
-		...(["2.0"] as const)
+		...(["2.0", "2.1"] as const)
 			.map(version => this.fromJSON({
 				name: `Space Age ${version}`,
 				description: `Factorio ${version} with Space Age expansion.`,

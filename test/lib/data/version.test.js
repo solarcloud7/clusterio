@@ -19,11 +19,11 @@ describe("lib/data/version", function() {
 	});
 	describe("isApiVersion()", function() {
 		it("should correctly validate input strings", function() {
-			const valid = ["0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0"];
+			const valid = ["0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0", "2.1"];
 			for (const test of valid) {
 				assert.equal(lib.isApiVersion(test), true, test);
 			}
-			const invalid = ["0.12", "0.19", "1.2", "2.1", "1.0.0", "1.0.0.0", "0", "", "latest"];
+			const invalid = ["0.12", "0.19", "1.2", "1.0.0", "1.0.0.0", "0", "", "latest"];
 			for (const test of invalid) {
 				assert.equal(lib.isApiVersion(test), false, test);
 			}
@@ -40,6 +40,8 @@ describe("lib/data/version", function() {
 			assert.equal(lib.normaliseApiVersion("2.0"), "2.0");
 			assert.equal(lib.normaliseApiVersion("2.0.0"), "2.0");
 			assert.equal(lib.normaliseApiVersion("2.0.1"), "2.0");
+			assert.equal(lib.normaliseApiVersion("2.1"), "2.1");
+			assert.equal(lib.normaliseApiVersion("2.1.8"), "2.1");
 			assert.equal(lib.normaliseApiVersion("1.0.0.0"), "1.0");
 		});
 		it("should throw for invalid versions", function() {
@@ -85,7 +87,7 @@ describe("lib/data/version", function() {
 	describe("isPartialVersion()", function() {
 		it("should correctly validate input strings", function() {
 			const valid = [
-				"0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0",
+				"0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0", "2.1",
 				"0.12.0", "0.13.1", "0.17.99", "00.000.0001", "1.1.110",
 			];
 			for (const test of valid) {
@@ -108,7 +110,7 @@ describe("lib/data/version", function() {
 	describe("isTargetVersion()", function() {
 		it("should correctly validate input strings", function() {
 			const valid = [
-				"0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0",
+				"0.13", "0.14", "0.15", "0.16", "0.17", "0.18", "1.0", "1.1", "2.0", "2.1",
 				"0.12.0", "0.13.1", "0.17.99", "00.000.0001", "1.1.110", "latest",
 			];
 			for (const test of valid) {

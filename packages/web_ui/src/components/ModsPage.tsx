@@ -145,7 +145,7 @@ function SearchModsButton() {
 	const [open, setOpen] = useState(false);
 	const [form] = Form.useForm();
 	const [searchText, setSearchText] = useState("");
-	const [factorioVersion, setFactorioVersion] = useState<lib.ApiVersion>("2.0");
+	const [factorioVersion, setFactorioVersion] = useState<lib.ApiVersion>("2.1");
 
 	// State for all mods fetched from backend
 	const [allMods, setAllMods] = useState<ModPortalModType[]>([]);
